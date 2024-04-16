@@ -1,0 +1,209 @@
+#Lets import the necessary libraries for our project
+!pip install arcpy
+import arcpy
+import numpy
+import pandas as pd
+
+
+#Lets create and implement a class for outdoor and sport facilities
+class Facility:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.facility_type = os.path.basename(file_path).split('.')[0]  
+        self.facilities = [] 
+
+        # Read facility data from file, skipping the first line
+        with open(file_path, 'r') as file:  # Use 'r' mode to indicate reading
+            next(file)  # Skip the header line
+            for line in file:
+                data = line.strip().split(',')  
+                # Check if the line has enough columns
+                if len(data) >= 7:
+                    try:
+                        latitude = float(data[5])  
+                        longitude = float(data[6])  
+                    except ValueError:
+                        continue  # Skip lines with invalid latitude or longitude
+                    self.facilities.append({
+                        'latitude': latitude,
+                        'longitude': longitude,
+                        'name': data[0],  # Adjust index based on your column order
+                        'district': data[2]  # Adjust index based on your column order
+                    })
+
+    def create_feature_class(self, output_gdb, spatial_reference=None):
+        # Create spatial reference object if specified
+        sr = arcpy.SpatialReference(spatial_reference) if spatial_reference else None
+
+        # Create new feature class in the output geodatabase with specified spatial reference
+        arcpy.CreateFeatureclass_management(output_gdb, self.facility_type, 'POINT', spatial_reference=sr)
+
+        # Add fields to the feature class
+        arcpy.AddField_management(os.path.join(output_gdb, self.facility_type), 'Name', 'TEXT')
+        arcpy.AddField_management(os.path.join(output_gdb, self.facility_type), 'District', 'TEXT')
+
+        # Insert facility data into the feature class
+        with arcpy.da.InsertCursor(os.path.join(output_gdb, self.facility_type), ['SHAPE@', 'Name', 'District']) as cursor:
+            for facility in self.facilities:
+                cursor.insertRow((
+                    arcpy.Point(facility['longitude'], facility['latitude']),
+                    facility['name'],
+                    facility['district']
+                ))
+
+    def find_nearest_facility(self, lat, lng):
+        nearest_facility = None
+        min_distance = float('inf')
+
+        # Calculate distance to each facility and find the nearest one
+        for facility in self.facilities:
+            distance = ((facility['latitude'] - lat) ** 2 + (facility['longitude'] - lng) ** 2) ** 0.5
+            if distance < min_distance:
+                min_distance = distance
+                nearest_facility = facility
+
+        return nearest_facility
+
+output_gdb = 'E:/PrOjEcTs/Data Analysis Task - Haran/Investigating Sporting in Hong Kong/Investigating Sporting in Hong Kong.gdb'
+
+file_path = 'E:/PrOjEcTs/Data Analysis Task - Haran/Raw Data-1/Raw Data CSV/Basketball_court.csv'
+
+outdoor_facilities = Facility(file_path)
+
+# Lets create feature class for outdoor facilities with WGS 1984 coordinate system (EPSG:4326)
+outdoor_facilities.create_feature_class(output_gdb, spatial_reference=4326)
+
+# Lets find the nearest facility to a specific location
+nearest_facility = outdoor_facilities.find_nearest_facility(22.44862, 114.13585)  # Example lat/lng
+print(nearest_facility)  # Print the nearest facility
+
+
+# Lets create python scripts/modules that analyze the spatial distribution of sports and outdoor facilities in Hong Kong
+
+# What are the spatial distributions of different types of sport and outdoor facilities in 
+# Hong Kong? Given a specific facility type, which areas in HK have a good coverage of 
+# it and which areas do not?
+
+# Define the paths to the datasets for each facility type
+dataset_paths = {
+    'swimming_pools': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\swimming_pools.shp',
+    'sports_grounds': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\sports_grounds.shp',
+    'parks_garden': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\parks_garden.shp',
+    'other_recreation_facilities': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Other_recreation_facilities.shp',
+    'fitness_center': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Fitness_center.shp',
+    'country_parks': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Country_parks.shp',
+    'basketball_court': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Basketball_court.shp',
+    'badminton_court': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Badminton_court.shp',
+    'Hong_Kong': r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\HKDistrict18.shp',
+}
+
+# Function to read spatial data into a pandas DataFrame
+def read_spatial_data(dataset_path):
+    fields = [field.name for field in arcpy.ListFields(dataset_path)]
+    data = [row for row in arcpy.da.SearchCursor(dataset_path, fields)]
+    return pd.DataFrame(data, columns=fields)
+
+# Read each dataset into a pandas DataFrame and store in a dictionary
+facility_data = {}
+for facility_type, dataset_path in dataset_paths.items():
+    facility_data[facility_type] = read_spatial_data(dataset_path)
+
+# Function to identify areas with good coverage of a specific facility type
+def identify_areas_with_good_coverage(facility_data, facility_type):
+    df = facility_data[facility_type]
+    
+    # we can merge all facility DataFrames into one DataFrame
+    all_facilities_df = pd.concat(facility_data.values())
+    area_coverage = all_facilities_df.groupby(['District']).size().reset_index(name='facility_count')
+    
+    # Finally we can filter areas with good coverage of the specified facility type
+    good_coverage_areas = area_coverage[area_coverage['facility_count'] > 0]
+    
+    # Include facility names and counts
+    facility_info = all_facilities_df.groupby(['District', 'Facility_N']).size().reset_index(name='facility_count')
+    facility_names = facility_info.groupby('District')['Facility_N'].apply(list).reset_index(name='facility_names')
+    good_coverage_areas = pd.merge(good_coverage_areas, facility_names, on=['District'], how='left')
+    
+    return good_coverage_areas
+
+def identify_areas_within_distance(facility_data, facility_types, facility_name, distance):
+    # We can merge all facility DataFrames into one DataFrame
+    all_facilities_df = pd.concat(facility_data.values())
+    relevant_facilities_df = all_facilities_df[
+        (all_facilities_df['Facility_N'].isin(facility_types)) &
+        (all_facilities_df['Facility_N'] == facility_name)
+    ]
+    
+    # Get unique districts within the specified distance to at least one facility
+    nearby_districts = relevant_facilities_df['District'].unique()
+    
+    return nearby_districts
+    
+# 1. Identify areas with good coverage of a specific facility type (e.g., badminton courts)
+facility_type = 'badminton_court'
+good_coverage_areas = identify_areas_with_good_coverage(facility_data, facility_type)
+print(f"Areas with good coverage of {facility_type} (sorted by facility count):")
+print(good_coverage_areas[['District', 'facility_count']].sort_values(by='facility_count', ascending=False))
+   
+# 3. Identify areas with good coverage of three or more facility types
+print("Areas with good coverage of three or more facility types (sorted by facility count):")
+print(good_multi_coverage_areas[['District', 'facility_count']].sort_values(by='facility_count', ascending=False))
+
+
+
+#2.  Given a specific facility type, which areas in HK are within a reasonable walking 
+#distance to at least one of such facility, and which areas are within a user-specified 
+#distance? (Hint: Write a python script with an input parameter taking the distance value).
+
+# Define paths to the datasets
+badminton_court_path = r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Badminton_court.shp'
+hong_kong_boundary_path = r'E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\HKDistrict18.shp'
+
+# Function to find areas within a specified distance to a facility
+def areas_within_distance(facility_name, facility_layer_path, boundary_layer_path, distance):
+    # Create a feature layer from the facility shapefile
+    arcpy.MakeFeatureLayer_management(facility_layer_path, "Badminton_court")
+    
+    # Select the facility by attribute
+    query = f"Facility_N = '{facility_name}'"
+    arcpy.SelectLayerByAttribute_management("Badminton_court", "NEW_SELECTION", query)
+    
+    # Create a feature layer from the boundary shapefile
+    arcpy.MakeFeatureLayer_management(boundary_layer_path, "boundary_lyr")
+    
+    # Lets use spatial join to find areas within the specified distance
+    output_layer = arcpy.analysis.SpatialJoin("boundary_lyr", "Badminton_court", "in_memory/areas_within_distance", "JOIN_ONE_TO_MANY", "KEEP_COMMON", search_radius=distance)
+    
+    # Get unique districts within the specified distance
+    districts = set()
+    with arcpy.da.SearchCursor(output_layer, ['District']) as cursor:
+        for row in cursor:
+            districts.add(row[0])
+    
+    return districts
+
+# Example usage
+facility_name = 'Boundary Street Sports Centre No. 1'  # Change this to the desired facility name
+walking_distance = 500  # Specify the walking distance in meters
+
+# Finally lets find areas within the walking distance to the specified facility
+areas_within_walking_distance = areas_within_distance(facility_name, badminton_court_path, hong_kong_boundary_path, walking_distance)
+
+# Print the result
+print(f"Areas within {walking_distance} meters to {facility_name}:")
+for district in areas_within_walking_distance:
+    print(district)
+#Further we can cross check properties of a given layer
+#Other insights that you want us to know (**Bonus, up to 10% of the total marks)
+
+swimming_pools = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\swimming_pools.shp")
+sports_grounds = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\sports_grounds.shp")
+parks_garden = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\parks_garden.shp")
+other_recreation_facilities = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Other_recreation_facilities.shp")
+fitness_center = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Fitness_center.shp")
+country_parks = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Country_parks.shp")
+basketball_court = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Basketball_court.shp")
+badminton_court = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\Badminton_court.shp")
+Hong_Kong = arcpy.Describe("E:\PrOjEcTs\Data Analysis Task - Haran\Raw Data-1\Raw Data Shapefiles\HKDistrict18.shp")
+
+Hong_Kong
